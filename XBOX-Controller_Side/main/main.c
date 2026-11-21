@@ -1,3 +1,18 @@
+/*
+ * Xbox-Controller_Side
+ *
+ * This ESP32-S3 firmware reads an Xbox controller over USB and sends its
+ * button, trigger, and joystick values as text messages to a configured
+ * receiver over ESP-NOW. The file contains wireless initialization, report
+ * decoding and transmission, USB callbacks, controller startup and packet
+ * handling, and two FreeRTOS tasks: one services the USB host library, while
+ * the other detects the controller and processes its input. The app_main()
+ * entry point initializes ESP-NOW and starts the USB host task.
+*/
+
+
+
+
 
 
 /* The <...> are for the standard C library

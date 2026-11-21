@@ -91,7 +91,7 @@ static void pwm_init(void)
 // Return true if the received button list contains button A.
 static bool a_button_pressed(const char *text)
 {
-    const char *buttons = strstr(text, "Buttons=");         
+    const char *buttons = strstr(text, "Buttons=");         // Check if there is "Buttons=" inside the text, character per character
     if (buttons == NULL) {
         return false;
     }
@@ -123,7 +123,7 @@ static void buzzer_set(bool enabled)
     ESP_ERROR_CHECK(ledc_set_duty(
         LEDC_LOW_SPEED_MODE,
         LEDC_CHANNEL_0,
-        enabled ? 512 : 0
+        enabled ? 512 : 0       // 50% of duty cycle
     ));
 
     ESP_ERROR_CHECK(ledc_update_duty(

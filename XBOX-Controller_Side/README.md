@@ -1,64 +1,68 @@
-# Xbox Controller to ESP-NOW Transmitter
+﻿# Xbox Controller → ESP-NOW
 
-## Purpose
-
-This firmware turns an ESP32-S3 into a bridge between a wired Xbox controller and a second ESP32. It reads controller reports through USB Host, extracts buttons, triggers, and joystick positions, and sends a readable text message to the receiver using ESP-NOW.
-
-The current implementation is a bench-test prototype for the controller side of the UAV project. It demonstrates the input and wireless transmission path. It does not implement flight control, actuator commands, or a complete control-link failsafe.
+ESP32-S3 firmware that reads a wired Xbox controller over USB and forwards its buttons, triggers, and joystick positions to another ESP32 using ESP-NOW. This is the controller-side firmware of the UAV project; receiver firmware is maintained separately.
 
 ```text
-Xbox controller
-    | USB cable
-    v
-ESP32-S3 USB Host
-    | Validate and decode controller report
-    v
-Text message
-    | ESP-NOW, channel 1
-    v
-Receiving ESP32
+Xbox controller ──USB──▶ ESP32-S3 ──ESP-NOW──▶ Receiving ESP32
+                        Read · Decode · Send
 ```
 
-The receiver firmware is separate from this folder. No router or IP connection is configured by this application.
+## Features
 
-## Current bench configuration
+- Detects the supported controller and sends its startup commands.
+- Validates incoming USB reports before decoding controller inputs.
+- Sends readable text messages directly to a configured receiver, without a router.
+- Handles USB disconnection and releases transfers and the claimed interface.
+- Uses separate FreeRTOS tasks for USB host events and controller communication.
 
-| Item | Configuration in this project |
+## Bench-test setup
+
+![Xbox controller connected to the ESP32-S3 through USB adapter PCBs, with a battery pack and external USB power wire](docs/images/controller-bench-test.jpeg)
+
+The current bench setup connects the controller's USB-C cable to the ESP32-S3 through USB-C-to-micro-USB adapter PCBs. The red wire feeds the controller's USB VBUS (5 V power line) directly at the adapter because the board's diode prevents power from reaching it through the normal USB path.
+
+The setup uses six 1.5 V alkaline cells arranged as **3S2P** (three in series, two strings in parallel), giving **4.5 V nominal**. The ESP32-S3 reads controller inputs over USB and forwards them to the receiver using **ESP-NOW over the 2.4 GHz Wi-Fi radio**.
+
+## Hardware and configuration
+
+You need an ESP32-S3 board with access to its native USB host interface, a suitable USB data cable/host adapter and controller power supply, a compatible Xbox controller, and an ESP-NOW receiver.
+
+The current settings are defined in [main/main.c](main/main.c):
+
+| Setting | Value |
 | --- | --- |
-| Target | ESP32-S3 |
-| Resolved ESP-IDF version | 6.1.0, recorded in `dependencies.lock` |
-| Resolved USB Host component | `espressif/usb` 1.6.1 |
-| Accepted controller USB IDs | VID `0x045E`, PID `0x0B12` |
-| USB interface | Interface 0, alternate setting 0 |
+| Controller USB VID / PID | `0x045E` / `0x0B12` |
+| USB interface / alternate setting | `0` / `0` |
 | USB endpoints | IN `0x82`, OUT `0x02` |
-| USB transfer buffer size | 64 bytes per direction |
-| Accepted input report | 48 bytes, header `20 00 <sequence> 2C` |
-| Wi-Fi interface | Station mode, with no router connection requested |
-| ESP-NOW channel | 1, defined by `ESPNOW_CHANNEL` |
-| Receiver station MAC | `E8:F6:0A:A8:D5:68`, defined by `receiver_mac` |
+| Accepted input report | 48 bytes: `20 00 <sequence> 2C …` |
+| ESP-NOW channel | `1` (`ESPNOW_CHANNEL`) |
+| Receiver MAC | `E8:F6:0A:A8:D5:68` (`receiver_mac`) |
 | ESP-NOW encryption | Disabled |
 | Wi-Fi power saving | Disabled |
-| Serial console | UART0, 115200 baud in the current `sdkconfig` |
 
-The controller IDs, report layout, interface, and endpoints are hard-coded. Other controller variants are not automatically supported. The receiver must use the configured MAC address and channel, or the transmitter settings must be adapted to the bench hardware.
+Update `receiver_mac` to match your receiver's Wi-Fi station MAC, and configure both boards on the same channel. Controller IDs, endpoints, and report layout are hard-coded; other controller variants require adaptation.
 
-## Bench test
+## Build and run
 
-### Objective
+The committed [dependency lockfile](dependencies.lock) records **ESP-IDF 6.1.0** and **espressif/usb 1.6.1**, targeting **ESP32-S3**.
 
-The bench test checks whether controller actions can travel through the USB-to-ESP-NOW path and appear correctly at the receiver.
+1. Open an ESP-IDF terminal in this project directory.
+2. Update the receiver settings in `main/main.c`.
+3. Build, flash, and open the serial monitor:
 
+   ```sh
+   idf.py build
+   idf.py -p PORT flash monitor
+   ```
 
-### Procedure and expected observations
+   Replace `PORT` with the board's serial port, for example `COM5`. The committed `sdkconfig` already selects `esp32s3`; the UART0 console runs at **115200 baud**.
 
-1. Power the receiver and start its receiver firmware and serial monitor.
-2. Start the transmitter firmware and its serial monitor. Check for the firmware-started and USB-client-ready messages.
-3. Connect the controller. Check that the logged VID and PID match the configured values. The firmware then claims the interface and sends the configured controller startup commands.
-4. Press buttons, operate both triggers, and move both joysticks. Check that the transmitter logs formatted reports and that matching messages appear at the receiver.
-5. Check simultaneous button presses and the return to released/neutral values.
-6. Disconnect and reconnect the controller. Check that USB capture stops, resources are released, and reports resume after reconnection.
+4. Start the receiver firmware on the second board, then connect the controller to the transmitter's native USB host interface. Check for `USB client ready` and the matching VID/PID in the logs.
+5. Move the sticks, operate the triggers, and press buttons. Verify that matching messages appear at the receiver. Exit the ESP-IDF monitor with `Ctrl+]`.
 
-An illustrative transmitted message is:
+## Message format
+
+Each accepted input report produces a text payload such as:
 
 ```text
 Report=12 | LT=0 RT=0 | L=(0,0) R=(0,0) | Buttons=A,LB
@@ -66,75 +70,28 @@ Report=12 | LT=0 RT=0 | L=(0,0) R=(0,0) | Buttons=A,LB
 
 | Field | Meaning |
 | --- | --- |
-| `Report` | Sequence byte from the controller's USB report; not a delivery counter |
+| `Report` | Controller report sequence byte |
 | `LT`, `RT` | Raw unsigned trigger values |
-| `L`, `R` | Raw signed X/Y joystick values; no dead zone or normalization is applied |
+| `L`, `R` | Raw signed joystick `(X,Y)` values, without dead zones or normalization |
 | `Buttons` | Comma-separated pressed buttons, or `none` |
 
-The supported button names are A, B, X, Y, Menu, View, Up, Down, Left, Right, LB, RB, LClick, and RClick.
+Supported buttons: `A`, `B`, `X`, `Y`, `Menu`, `View`, `Up`, `Down`, `Left`, `Right`, `LB`, `RB`, `LClick`, `RClick`.
 
-The payload includes a final newline. The terminating C string null byte is not transmitted, so the receiver must respect the received payload length.
+Payloads end with a newline and exclude the terminating C null byte. The receiver must use the received payload length when reading the message.
 
-### What the test establishes
+## Firmware structure
 
-The transmitter's `ESP-NOW queued` log means that `esp_now_send()` accepted the message for transmission. It does not confirm reception. End-to-end verification requires observing the message at the receiver.
-
-This README describes the test procedure and expected behavior from the source code. It does not record a completed hardware test or measured latency, range, packet loss, or reconnection reliability.
-
-## Code structure
-
-### Project files
-
-```text
-.
-|-- CMakeLists.txt          Project definition: xbox_controller_side
-|-- sdkconfig              Target and ESP-IDF build configuration
-|-- dependencies.lock      Resolved component versions
-|-- main/
-|   |-- CMakeLists.txt      Registers main.c as an application source
-|   |-- idf_component.yml  Declares ESP-IDF and USB component dependencies
-|   `-- main.c             Application implementation
-|-- managed_components/    Dependencies managed by ESP-IDF
-`-- build/                 Generated build output
-```
-
-### Functions and responsibilities
-
-All application logic currently lives in [main/main.c](main/main.c).
+All application logic is in [main/main.c](main/main.c):
 
 | Function | Responsibility |
 | --- | --- |
-| `app_main()` | Initializes wireless communication and creates the USB Host task. |
-| `wireless_init()` | Initializes NVS and the default event loop, starts Wi-Fi on channel 1, initializes ESP-NOW, and registers the receiver peer. The `esp_netif_init()` call is currently commented out. |
-| `usb_host_task()` | Installs the USB Host library, registers a client, creates the client task, and continuously services host-library events. |
-| `usb_client_task()` | Processes client events, opens detected devices, checks their VID/PID, starts capture for the matching controller, and closes the device afterward. |
-| `usb_client_event_cb()` | Records a newly detected USB address or flags disconnection of the active controller. |
-| `read_xbox_packets()` | Claims the interface, allocates reusable IN/OUT transfers, sends startup commands, validates incoming reports, and cleans up when capture ends. |
-| `xbox_transfer_done()` | Clears the completed transfer's pending flag through its context pointer. |
-| `read_u16_le()` | Combines two little-endian bytes into an unsigned 16-bit value. |
-| `read_stick_axis()` | Converts a two-byte joystick field to a signed numeric value. |
-| `send_report()` | Decodes report fields, formats a text message, submits it to ESP-NOW, and logs submission status. |
+| `app_main()` / `wireless_init()` | Initialize wireless communication and start the USB host task. |
+| `usb_host_task()` | Install the USB Host library, register a client, start the client task, and service host events. |
+| `usb_client_task()` | Open detected devices, check controller IDs, run capture, and close the device afterward. |
+| `read_xbox_packets()` | Send startup commands, reuse USB transfers, validate reports, and clean up after capture. |
+| USB callbacks | Record device events and mark transfers as complete. |
+| `send_report()` and decoding helpers | Extract input values, format the payload, and submit it to ESP-NOW. |
 
-### Execution and resource ownership
+## Current scope
 
-- The USB Host task services library-level work, including device enumeration.
-- The USB client task handles device notifications and controller transfers. While capture is active, `read_xbox_packets()` continues processing client events.
-- USB client and transfer callbacks execute when the client task calls `usb_host_client_handle_events()`. They update state for that task to process.
-- ESP-IDF creates its own Wi-Fi and default event-loop tasks during initialization.
-- Both application-created USB tasks use priority 5 and a 4096-byte stack.
-
-One transfer and buffer are allocated for each USB direction and reused. Cleanup halts and flushes pending transfers, processes their completion callbacks, frees the transfer objects, and releases the interface. The caller then closes the device handle.
-
-## Future improvements
-
-- [ ] **Add control-link monitoring:** track receiver acknowledgments or heartbeat messages and define receiver behavior when controller input stops or becomes stale.
-- [ ] **Measure wireless performance:** record received sequence numbers, loss, latency, and behavior under sustained controller input. Distinguish local submission, radio delivery, and receiver application processing.
-- [ ] **Improve recovery:** handle selected NVS initialization failures with an explicit data-preservation policy; define recovery for USB transfer, disconnect, and cleanup failures.
-- [ ] **Separate responsibilities:** move USB handling, report decoding, and wireless communication into focused modules; keep `app_main()` as startup coordination.
-- [ ] **Define a versioned message format:** separate controller state from display text, with an explicit byte layout if binary messages are introduced.
-- [ ] **Control the transmission workload:** consider a bounded queue or latest-state buffer between USB input and wireless sending, and reduce per-report logging when measuring timing.
-- [ ] **Make hardware settings configurable:** expose receiver MAC, channel, and supported controller settings instead of embedding them directly in the source.
-- [ ] **Improve protocol readability:** name report sizes, offsets, and USB IDs; simplify the longer functions and correct outdated or misleading comments.
-- [ ] **Add focused validation:** test report decoding and formatting with known packets; exercise disconnection, reconnection, allocation failures, and receiver absence on hardware.
-- [ ] **Evaluate input processing and security:** add joystick calibration/dead zones where required and configure ESP-NOW encryption when moving beyond the unencrypted bench setup.
-- [ ] **Align dependency declarations:** update the broad ESP-IDF version constraint and wildcard USB dependency to reflect the versions actually supported and tested.
+This is a bench-test prototype for the USB-to-wireless input path. The `ESP-NOW queued` log confirms local submission only; verify reception on the receiving board. Flight control, link-loss failsafes, input calibration, and delivery acknowledgments are not implemented. Latency, range, and reliability measurements are not documented here.
