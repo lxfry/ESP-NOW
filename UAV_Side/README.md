@@ -1,140 +1,78 @@
-# UAV-Side ESP-NOW Receiver
+﻿# UAV-Side ESP-NOW Receiver
 
-## Purpose
+ESP-IDF firmware for an ESP32-S3 that receives controller reports over ESP-NOW, prints them to the serial console, and controls a buzzer through PWM on GPIO47.
 
-This ESP-IDF firmware implements the UAV-side receiver for a controller communication bench test. It receives text messages over ESP-NOW and prints them to the serial console so that controller input can be checked at the receiving end of the wireless link.
+The companion [Xbox-controller transmitter](../XBOX-Controller_Side/) reads a wired Xbox controller over USB and sends its button, trigger, and joystick states. No router is required.
 
-The companion [Xbox-controller transmitter](../XBOX-Controller_Side/) reads a wired Xbox controller through USB Host, formats its buttons, triggers, and joystick positions as text, and sends that text to this receiver.
+## Behavior
 
-```text
-Xbox controller
-    | USB
-    v
-Transmitter ESP32-S3
-    | ESP-NOW, channel 1
-    v
-UAV-side ESP32-S3
-    | Receive callback -> FreeRTOS queue -> app_main()
-    v
-Serial console
-```
+- Receives text reports on Wi-Fi channel **1** with Wi-Fi power saving disabled.
+- Enables **1 kHz PWM at 50% duty cycle** when the received `Buttons=` list contains `A`; otherwise, GPIO47 is held low. The output starts low.
+- Copies incoming reports into a **10-message FreeRTOS queue**. The main loop processes each report, updates the buzzer, and prints the text.
+- Accepts payloads of **1–249 bytes**. New reports are dropped if the queue is full.
 
-The current application demonstrates reception and display of controller reports. It does not parse those reports into control commands, drive motors or servos, or implement flight control or a link-loss failsafe. No router or IP connection is required by this application.
-
-## Current configuration
-
-| Setting | Value or behavior |
-| --- | --- |
-| Build target | ESP32-S3, selected in `sdkconfig` |
-| Wi-Fi interface | Station mode |
-| ESP-NOW channel | `1`, defined by `ESPNOW_CHANNEL` |
-| Wi-Fi power saving | Disabled |
-| Wi-Fi configuration storage | RAM |
-| Receive buffer | 250 bytes per queued message |
-| Accepted payload length | 1 to 249 bytes; one additional byte is reserved for the terminating null character |
-| Queue capacity | 10 messages |
-| Queue overflow | Incoming message is silently dropped when the queue is full |
-| Sender filtering | No source MAC check in the application callback |
-| Serial console baud rate | 115200 in the current `sdkconfig` |
-
-The receiver prints its station MAC address at startup. The transmitter's `receiver_mac` must match this address, and both boards must use the same radio channel. The companion transmitter currently sends unencrypted packets; this receiver does not configure encrypted peers.
-
-## Bench test
-
-### Objective and equipment
-
-The bench test checks the complete input path: operating the Xbox controller should produce matching text reports on the UAV-side serial console.
-
-The setup requires this receiver board, a second board running the companion transmitter firmware, a compatible wired Xbox controller connected to the transmitter's USB Host interface, and a computer connection for monitoring the receiver. Monitoring the transmitter as well makes it easier to compare sent and received reports.
-
-### Build and start the receiver
-
-From an ESP-IDF-enabled terminal in this folder, build and flash the application, replacing `COM_PORT` with the receiver's actual serial port:
-
-```sh
-idf.py build
-idf.py -p COM_PORT flash monitor
-```
-
-The current project configuration targets ESP32-S3. At startup, the application prints:
-
-```text
-UAV station MAC: <receiver station MAC>
-Listening for ESP-NOW messages on channel 1
-```
-
-### Procedure and expected observations
-
-1. Start the receiver and note the station MAC printed in its console.
-2. Set the companion transmitter's `receiver_mac` to that MAC and confirm its `ESPNOW_CHANNEL` matches the receiver. Rebuild and flash the transmitter if its settings change.
-3. Start the transmitter and connect the Xbox controller.
-4. Press and release buttons, operate both triggers, and move both joysticks. Check that the corresponding reports appear on the receiver console.
-5. Check simultaneous button presses and the return to released or neutral values. If monitoring both boards, compare the formatted reports on each console.
-6. Stop the transmitter or disconnect the controller. The receiver should stop printing reports once any queued messages have been consumed. Resume input and check that reports appear again.
-
-An illustrative report is:
+Example report:
 
 ```text
 Report=12 | LT=0 RT=0 | L=(0,0) R=(0,0) | Buttons=A,LB
 ```
 
-`Report` is the sequence byte from the controller's USB report; `LT` and `RT` are raw trigger values; `L` and `R` contain raw joystick X/Y values; and `Buttons` lists pressed buttons or `none`. The receiver displays this text without interpreting its fields. The transmitter includes the final newline, and the receiver does not add one.
+Only the button list is interpreted for buzzer control; other fields are printed as received.
 
-### Scope of the test
+## Hardware and configuration
 
-Seeing a report on the receiver confirms that the corresponding payload reached the receiving application and was printed. The transmitter's successful send submission alone does not establish this.
+The bench setup uses an ESP32-S3 receiver board with a buzzer connected directly to GPIO47, plus a second board running the companion transmitter firmware. The controller connects to the transmitter's USB Host interface.
 
-The receiver provides no timeout warning when input stops, no application-level acknowledgment, and no delivery or timing statistics. This README describes the setup and expected behavior from the source; it does not record a completed hardware test or measured latency, range, or packet loss.
+| Setting | Current value |
+| --- | --- |
+| Framework | ESP-IDF; current configuration generated with v6.1.0 |
+| Target | ESP32-S3 |
+| Radio channel | `ESPNOW_CHANNEL = 1` |
+| Serial baud rate | 115200 |
+| CPU / main crystal | 160 MHz / 40 MHz |
+| PWM output | GPIO47, LEDC channel 0, timer 0, low-speed mode |
+| PWM frequency / resolution | 1 kHz / 10 bits (1024 counts) |
+| PWM clock selection | `LEDC_AUTO_CLK`; current ESP-IDF driver selects APB at 80 MHz |
+
+The LEDC driver calculates the PWM divider automatically: `80,000,000 / (1000 × 1024) = 78.125`. Clock and target settings are in `sdkconfig`; radio and PWM settings are in [main/main.c](main/main.c).
+
+## Build and use
+
+1. Open an ESP-IDF-enabled terminal in this project folder and build:
+
+   ```sh
+   idf.py build
+   ```
+
+2. Flash and open the serial monitor, replacing `COM_PORT` with the receiver's port:
+
+   ```sh
+   idf.py -p COM_PORT flash monitor
+   ```
+
+3. Read the **UAV station MAC** printed at startup. Set the transmitter's `receiver_mac` to that address and ensure both boards use the same ESP-NOW channel. Rebuild and flash the transmitter if needed.
+4. Send controller reports. Check that they appear in the receiver console. Press **A** to enable the buzzer PWM and release it to disable the output on the next report.
+
+## Bench test
+
+The receiver setup is powered by a custom battery pack containing **three 1.5 V alkaline cells in series**, providing approximately **4.5 V** to the board's supply input. The buzzer is driven directly from GPIO47 by the firmware's **1 kHz, 50% duty-cycle PWM** when button A is reported as pressed.
+
+![Battery-powered ESP32-S3 receiver, buzzer, wiring, and USB-to-UART bridge](docs/images/bench-setup.jpeg)
+
+Received ESP-NOW reports are printed through **UART0**. An **FTDI FT232 USB-to-UART bridge** connects the board's UART0 pins to the PC, where **PuTTY** displays the reports at **115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control**. The photo below shows reports alternating between `Buttons=A` and `Buttons=none`.
+
+![PuTTY displaying controller reports received over ESP-NOW and forwarded through UART0](docs/images/putty-controller-reports.jpeg)
 
 ## Code structure
 
-### Project files
+All application logic is in [main/main.c](main/main.c):
 
-```text
-UAV_Side/
-|-- README.md              Purpose, bench procedure, and implementation notes
-|-- CMakeLists.txt         ESP-IDF project definition: uav_side
-|-- sdkconfig              Target and ESP-IDF build configuration
-`-- main/
-    |-- CMakeLists.txt     Registers main.c and its component dependencies
-    `-- main.c             Receiver implementation
-```
+- `pwm_init()` and `buzzer_set()`: configure LEDC and switch the output duty cycle.
+- `a_button_pressed()`: find button `A` in the comma-separated button list.
+- `receive_callback()` and `wireless_init()`: queue incoming messages and initialize Wi-Fi/ESP-NOW.
+- `app_main()`: initialize the application, print connection information, and process queued reports.
 
-The main component declares dependencies on `esp_hw_support`, `esp_wifi`, `esp_event`, `esp_netif`, `nvs_flash`, and `freertos`.
+## Limitations
 
-### Application responsibilities
+This is a communication and buzzer bench test, not flight-control firmware. **There is no link-loss timeout: the buzzer retains its last state if reports stop.** The receiver does not filter sender MAC addresses or configure encrypted peers. Hardware performance, range, and latency are not documented as measured results.
 
-All application logic is in [main/main.c](main/main.c).
-
-| Element | Responsibility |
-| --- | --- |
-| `ESPNOW_CHANNEL` | Sets the radio channel used by the receiver. |
-| `MESSAGE_BUFFER_SIZE` | Defines the 250-byte text buffer size. |
-| `received_message_t` | Holds a copied, null-terminated text message. |
-| `receive_queue` | Transfers messages from the Wi-Fi callback to the main application task. |
-| `receive_callback()` | Rejects invalid pointers and payload lengths, copies the received bytes, appends a null terminator, and attempts a nonblocking queue send. |
-| `wireless_init()` | Initializes NVS, network infrastructure, and the default event loop; starts Wi-Fi in station mode; selects the channel; disables power saving; initializes ESP-NOW; and registers the receive callback. |
-| `app_main()` | Creates the queue, initializes wireless reception, prints the station MAC and channel, then waits for queued messages and prints them. |
-
-### Execution flow and message handling
-
-`app_main()` creates the queue before registering the callback, ensuring the queue is available when reception starts. Initialization and queue-allocation failures are checked with `ESP_ERROR_CHECK()`; there is no application recovery path for these failures.
-
-ESP-NOW invokes `receive_callback()` in the Wi-Fi task. The callback copies the payload into a local message structure, and `xQueueSend()` copies that structure into the queue. It uses a zero wait time so that waiting for console output cannot block the Wi-Fi task. If all 10 queue slots are occupied, the new message is dropped without a log or counter.
-
-The existing main application task waits on `xQueueReceive()` with `portMAX_DELAY` and prints each dequeued message using `printf("%s", message.text)`. The application creates no additional worker task. This separates reception from potentially slower serial printing.
-
-Received data is treated as text: the callback appends a null terminator, but an embedded null byte would cause printing to stop early. Messages of 250 bytes or more are rejected rather than truncated.
-
-## Future improvements
-
-- [ ] **Detect stale input and link loss:** record the last valid reception time, report timeouts, and define a safe response before connecting the receiver to actuators.
-- [ ] **Define and validate a message protocol:** introduce a versioned controller-state format, validate fields and ranges, and separate command decoding from console formatting.
-- [ ] **Measure communication performance:** add receiver counters, a dedicated packet sequence number, and timing instrumentation to assess loss, latency, and sustained input rates.
-- [ ] **Expose queue overflow:** count dropped messages and monitor queue occupancy; evaluate whether a latest-state buffer better suits control inputs than retaining older reports.
-- [ ] **Identify and authenticate the sender:** validate the expected source MAC and configure ESP-NOW peer encryption for the intended deployment.
-- [ ] **Add return-path status:** send application acknowledgments or receiver health messages when the transmitter needs confirmation of processing.
-- [ ] **Make settings configurable:** expose channel, expected sender, queue depth, and logging options through project configuration instead of source edits.
-- [ ] **Improve initialization recovery:** handle recoverable NVS and wireless errors explicitly, with a defined policy before erasing persistent storage.
-- [ ] **Separate responsibilities as the application grows:** move wireless setup, message validation, link monitoring, and UAV command handling into focused modules.
-- [ ] **Extend validation:** check payload boundaries, embedded null bytes, malformed messages, queue saturation, transmitter interruption, and reception recovery on hardware; record results and the tested ESP-IDF version.

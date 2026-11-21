@@ -1,8 +1,29 @@
+/*
+ * UAV-side ESP-NOW receiver.
+ *
+ * This firmware receives controller reports over ESP-NOW on Wi-Fi channel 1
+ * and prints them to the serial console. It reads the received button list
+ * and enables a 1 kHz, 50% duty-cycle PWM signal on GPIO47 while button A is
+ * reported as pressed. Otherwise, the output is held low.
+ *
+ * The code is organized into PWM initialization and buzzer control, button
+ * detection, ESP-NOW reception and wireless initialization, and app_main().
+ * The receive callback copies incoming reports into a FreeRTOS queue.
+ * The main loop processes queued reports, updates the buzzer, and prints
+ * each report. Reception and processing therefore run separately.
+ *
+ * This is a communication bench-test application, not a flight controller.
+ * The buzzer retains its last state until another report is processed;
+ * no link-loss timeout is implemented.
+*/
+
+
 
 
 #include <stdint.h>                 // Fixed-width integer types such as uint8_t and uint32_t.
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>  
 
 #include "freertos/FreeRTOS.h"      // FreeRTOS types and constants such as BaseType_t, pdPASS, and portMAX_DELAY.
 #include "freertos/queue.h"         // Task functions such as xTaskCreate().
@@ -14,6 +35,8 @@
 #include "esp_now.h"                // Initializes ESP-NOW, registers the receiver, and sends controller reports
 #include "esp_wifi.h"               // Configures and starts the Wi-Fi driver and radio required by ESP-NOW
 #include "nvs_flash.h"              // Initializes persistent flash storage used by the wireless subsystem. Allow you to use nvs_flash_init()
+
+#include "driver/ledc.h"            // LEDC Hardware peripheral allowing PWM generation
 
 
 
@@ -28,6 +51,100 @@ static QueueHandle_t receive_queue;
 
 
 
+
+
+
+
+
+
+
+/////////////////////////////////////// BUZZER //////////////////////////////////////////////////
+// Generate continuous 1 kHz PWM at 50% duty cycle on GPIO47.
+static void pwm_init(void)
+{
+    // Configure the timer that determines PWM frequency and resolution.
+    const ledc_timer_config_t timer = {                 // Use PLL(480MHz) -> APB at 80MHz (/6) -> Timer at 1.024MHz (/78.125)
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT,           // With 10bit each period has 1024counts
+        .timer_num       = LEDC_TIMER_0,
+        .freq_hz         = 1000,                        // f_PWM = f_TIM/1024
+        .clk_cfg         = LEDC_AUTO_CLK,               // Let the LEDC driver choose a suitable source clock for the frequency and resolution I requested
+    };
+
+    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+
+    // Route the PWM channel to GPIO47.
+    const ledc_channel_config_t channel = {
+        .gpio_num   = 47,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = LEDC_CHANNEL_0,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .timer_sel  = LEDC_TIMER_0,
+        .duty       = 0,                        // Initialize the signal with 0 duty cycle (off)
+        .hpoint     = 0,
+    };
+
+    ESP_ERROR_CHECK(ledc_channel_config(&channel));
+}
+
+
+// Return true if the received button list contains button A.
+static bool a_button_pressed(const char *text)
+{
+    const char *buttons = strstr(text, "Buttons=");         
+    if (buttons == NULL) {
+        return false;
+    }
+
+    buttons += strlen("Buttons=");          // Move the pointer toward directly after "Buttons="
+
+    while (*buttons != '\0' && *buttons != '\r' && *buttons != '\n') {
+        size_t length = strcspn(buttons, ",\r\n");          // Return the length before a coma, carriage return (\r), and newline (\n)
+
+        if (length == 1 && buttons[0] == 'A') {
+            return true;
+        }
+
+        buttons += length;
+
+        if (*buttons != ',') {
+            break;
+        }
+
+        ++buttons;
+    }
+
+    return false;
+}
+
+// Switch between a 50% PWM signal and a constant low output.
+static void buzzer_set(bool enabled)
+{
+    ESP_ERROR_CHECK(ledc_set_duty(
+        LEDC_LOW_SPEED_MODE,
+        LEDC_CHANNEL_0,
+        enabled ? 512 : 0
+    ));
+
+    ESP_ERROR_CHECK(ledc_update_duty(
+        LEDC_LOW_SPEED_MODE,
+        LEDC_CHANNEL_0
+    ));
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+//////////////////////////////////// ESP-NOW ////////////////////////////////////////////////////
 // Called by the Wi-Fi task whenever an ESP-NOW packet arrives.
 static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length) {
 
@@ -68,6 +185,18 @@ static void wireless_init(void)
 
     ESP_ERROR_CHECK(esp_now_register_recv_cb(receive_callback));
 }
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -79,6 +208,8 @@ static void wireless_init(void)
 // Entry point of the firmware
 void app_main(void)
 {
+    pwm_init();  // Start PWM on GPIO47.
+    
     receive_queue = xQueueCreate(10, sizeof(received_message_t));       // Create a queue holding up to 10 message structures. 
     ESP_ERROR_CHECK(receive_queue != NULL ? ESP_OK : ESP_ERR_NO_MEM);   // Abort if allocating the queue failed.
 
@@ -94,6 +225,10 @@ void app_main(void)
 
     while (1) {
         if (xQueueReceive(receive_queue, &message, portMAX_DELAY) == pdTRUE) {  // Wait for a queued message, copy it into message, and remove it from the queue.
+            
+            // Buzz if A pressed
+            buzzer_set(a_button_pressed(message.text));
+            
             // The firmware of the sender already includes a newline.
             printf("%s", message.text);
         }
